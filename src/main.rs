@@ -5,12 +5,13 @@ use std::{
 };
 
 use crossterm::event;
-use roads::NominatimEntry;
 use tui::{
     backend::CrosstermBackend,
     text::{Span, Spans},
     widgets, Terminal,
 };
+
+use roads::NominatimEntry;
 
 struct State {
     user_city: String,
@@ -153,11 +154,7 @@ fn main() -> anyhow::Result<()> {
                         let paths =
                             async_std::task::block_on(roads::fetch_roads(&state.cities_found[ix]))
                                 .unwrap();
-                        dump_svg(
-                            &format!("{}.svg", state.user_city),
-                            (1920.0, 1080.0),
-                            &paths,
-                        )?;
+                        dump_svg(&format!("{}.svg", state.user_city), (1920.0, 1080.0), paths)?;
                         break;
                     }
                 },
@@ -172,7 +169,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn dump_svg(path: &str, (w, h): (f64, f64), paths: &[Vec<(f64, f64)>]) -> io::Result<()> {
+fn dump_svg(path: &str, (w, h): (f64, f64), mut paths: Vec<Vec<(f64, f64)>>) -> io::Result<()> {
     use std::f64::{INFINITY, NEG_INFINITY};
 
     let mut min_x = INFINITY;
@@ -180,7 +177,9 @@ fn dump_svg(path: &str, (w, h): (f64, f64), paths: &[Vec<(f64, f64)>]) -> io::Re
     let mut max_x = NEG_INFINITY;
     let mut max_y = NEG_INFINITY;
 
-    for p in paths {
+    for p in &mut paths {
+        *p = roads::simplify::simplify(p);
+
         for (x, y) in p {
             min_x = x.min(min_x);
             min_y = y.min(min_y);
@@ -201,7 +200,7 @@ fn dump_svg(path: &str, (w, h): (f64, f64), paths: &[Vec<(f64, f64)>]) -> io::Re
     writeln!(
         f,
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {:.2} {:.2}">
 <g stroke="black" stroke-width="0.1" fill="none" >"#,
         (max_x - min_x) * sf,
         (max_y - min_y) * sf,
@@ -210,7 +209,7 @@ fn dump_svg(path: &str, (w, h): (f64, f64), paths: &[Vec<(f64, f64)>]) -> io::Re
     for p in paths {
         write!(f, r#"<polyline points=""#)?;
         for (x, y) in p {
-            write!(f, "{}, {} ", (x - min_x) * sf, h - (y - min_y) * sf)?;
+            write!(f, "{:.2}, {:.2} ", (x - min_x) * sf, h - (y - min_y) * sf)?;
         }
         writeln!(f, r#"" />"#)?;
     }
