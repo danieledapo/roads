@@ -6,6 +6,8 @@ use std::{
 
 use crossterm::event;
 
+use async_std::prelude::*;
+
 use tui::{
     backend::{Backend, CrosstermBackend},
     text::{Span, Spans},
@@ -112,6 +114,62 @@ impl State {
     }
 }
 
+async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> {
+    use event::{Event, EventStream, KeyCode, KeyEvent};
+
+    let mut reader = EventStream::new();
+    let mut state = State::new();
+
+    loop {
+        terminal.draw(|f| draw(f, &mut state))?;
+
+        let ev = match async_std::future::timeout(Duration::from_millis(500), reader.next()).await {
+            Err(_) => {
+                // timeout expired
+                continue;
+            }
+            Ok(ev) => ev,
+        };
+
+        match ev {
+            Some(Ok(event)) => {
+                let KeyEvent { code, .. } = match event {
+                    Event::Key(k) => k,
+                    _ => continue,
+                };
+
+                if code == KeyCode::Esc {
+                    break;
+                }
+
+                if code == KeyCode::Tab || code == KeyCode::BackTab {
+                    let tab_order = [
+                        WidgetId::Search,
+                        WidgetId::Places,
+                        WidgetId::Options,
+                        WidgetId::Keybindings,
+                    ];
+                    let current = tab_order.iter().position(|w| w == &state.focus).unwrap();
+                    let next = current
+                        + if code == KeyCode::Tab {
+                            1
+                        } else {
+                            tab_order.len() - 1
+                        };
+
+                    state.focus = tab_order[next % tab_order.len()];
+                    continue;
+                }
+
+                handle_event(code, &mut state).await?;
+            }
+            Some(Err(_)) | None => break,
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
 
@@ -119,46 +177,9 @@ fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = State::new();
-
     terminal.clear()?;
-    loop {
-        terminal.draw(|f| draw(f, &mut state))?;
 
-        if event::poll(Duration::from_millis(500))? {
-            use crossterm::event::{Event, KeyCode, KeyEvent};
-
-            let KeyEvent { code, .. } = match event::read()? {
-                Event::Key(k) => k,
-                _ => continue,
-            };
-
-            if code == KeyCode::Esc {
-                break;
-            }
-
-            if code == KeyCode::Tab || code == KeyCode::BackTab {
-                let tab_order = [
-                    WidgetId::Search,
-                    WidgetId::Places,
-                    WidgetId::Options,
-                    WidgetId::Keybindings,
-                ];
-                let current = tab_order.iter().position(|w| w == &state.focus).unwrap();
-                let next = current
-                    + if code == KeyCode::Tab {
-                        1
-                    } else {
-                        tab_order.len() - 1
-                    };
-
-                state.focus = tab_order[next % tab_order.len()];
-                continue;
-            }
-
-            handle_event(code, &mut state)?;
-        }
-    }
+    async_std::task::block_on(main_loop(&mut terminal))?;
 
     terminal.clear()?;
     crossterm::terminal::disable_raw_mode()?;
@@ -270,14 +291,15 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
     f.render_widget(keybindings, right_chunks[1]);
 }
 
-fn handle_event(code: event::KeyCode, state: &mut State) -> anyhow::Result<()> {
+async fn handle_event(code: event::KeyCode, state: &mut State) -> anyhow::Result<()> {
     use event::KeyCode;
 
     match state.focus {
         WidgetId::Search => match code {
             KeyCode::Enter => {
                 if !state.user_city.is_empty() {
-                    let cities = async_std::task::block_on(roads::search(&state.user_city))
+                    let cities = roads::search(&state.user_city)
+                        .await
                         .map_err(anyhow::Error::msg)?;
 
                     state.places = WrappingList::new(cities);
@@ -299,7 +321,8 @@ fn handle_event(code: event::KeyCode, state: &mut State) -> anyhow::Result<()> {
             }
             KeyCode::Enter => {
                 if let Some(place) = state.places.selected() {
-                    let paths = async_std::task::block_on(roads::fetch_roads(place))
+                    let paths = roads::fetch_roads(place)
+                        .await
                         .map_err(anyhow::Error::msg)?;
 
                     let w = state.option(State::WIDTH_OPTION).unwrap();
