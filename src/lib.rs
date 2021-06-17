@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 pub mod simplify;
+pub mod util;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NominatimEntry {
     pub place_id: i64,
     pub osm_type: String,

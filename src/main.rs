@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -11,10 +12,22 @@ use async_std::prelude::*;
 use tui::{
     backend::{Backend, CrosstermBackend},
     text::{Span, Spans},
-    widgets, Frame, Terminal,
+    Frame, Terminal,
 };
 
-use roads::NominatimEntry;
+use roads::{
+    util::{DotsSpinner, WrappingList},
+    NominatimEntry,
+};
+
+struct State {
+    focus: WidgetId,
+    user_city: String,
+    places: WrappingList<NominatimEntry>,
+    options: WrappingList<(&'static str, f64)>,
+    worker_state: WorkerState,
+    fetching_spinner: DotsSpinner,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WidgetId {
@@ -22,60 +35,13 @@ enum WidgetId {
     Search,
     Options,
     Keybindings,
+    Error,
 }
 
-struct WrappingList<T> {
-    data: Vec<T>,
-    state: widgets::ListState,
-}
-
-impl<T> WrappingList<T> {
-    fn new(data: Vec<T>) -> Self {
-        let mut l = Self {
-            data,
-            state: widgets::ListState::default(),
-        };
-
-        if !l.data.is_empty() {
-            l.state.select(Some(0));
-        }
-
-        l
-    }
-
-    fn selected(&self) -> Option<&T> {
-        Some(&self.data[self.state.selected()?])
-    }
-
-    fn selected_mut(&mut self) -> Option<&mut T> {
-        Some(&mut self.data[self.state.selected()?])
-    }
-
-    fn down(&mut self) {
-        if self.data.is_empty() {
-            return;
-        }
-
-        let next = (self.state.selected().unwrap_or_default() + 1) % self.data.len();
-        self.state.select(Some(next));
-    }
-
-    fn up(&mut self) {
-        if self.data.is_empty() {
-            return;
-        }
-
-        let next =
-            (self.state.selected().unwrap_or_default() + self.data.len() - 1) % self.data.len();
-        self.state.select(Some(next));
-    }
-}
-
-struct State {
-    focus: WidgetId,
-    user_city: String,
-    places: WrappingList<NominatimEntry>,
-    options: WrappingList<(&'static str, f64)>,
+enum WorkerState {
+    Idle,
+    Fetching,
+    Error(anyhow::Error),
 }
 
 impl State {
@@ -93,12 +59,20 @@ impl State {
                 (Self::HEIGHT_OPTION, 1080.0),
                 (Self::STROKE_WIDTH_OPTION, 0.1),
             ]),
+            worker_state: WorkerState::Idle,
+            fetching_spinner: DotsSpinner::new(),
+        }
+    }
+
+    fn worker_busy(&self) -> bool {
+        match self.worker_state {
+            WorkerState::Fetching => true,
+            WorkerState::Idle | WorkerState::Error(_) => false,
         }
     }
 
     fn max_option_key_len(&self) -> usize {
         self.options
-            .data
             .iter()
             .map(|(k, _)| k.len())
             .max()
@@ -107,10 +81,41 @@ impl State {
 
     fn option(&self, key: &str) -> Option<f64> {
         self.options
-            .data
             .iter()
             .find(|(k, _)| k == &key)
             .map(|(_, v)| *v)
+    }
+
+    fn fetch<T: Send + 'static>(
+        &mut self,
+        state: Arc<Mutex<Self>>,
+        fut: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+        mut on_success: impl FnMut(&mut Self, T) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        self.worker_state = WorkerState::Fetching;
+        self.fetching_spinner = DotsSpinner::new();
+
+        let _complete = async_std::task::spawn(async move {
+            let err = |st: &mut State, e| {
+                st.worker_state = WorkerState::Error(e);
+                st.focus = WidgetId::Error;
+                st.fetching_spinner = DotsSpinner::new();
+            };
+
+            match fut.await {
+                Ok(d) => {
+                    let mut state = state.lock().unwrap();
+                    state.worker_state = WorkerState::Idle;
+                    if let Err(e) = on_success(&mut state, d) {
+                        err(&mut state, e);
+                    }
+                }
+                Err(e) => {
+                    let mut state = state.lock().unwrap();
+                    err(&mut state, e);
+                }
+            }
+        });
     }
 }
 
@@ -118,12 +123,15 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
     use event::{Event, EventStream, KeyCode, KeyEvent};
 
     let mut reader = EventStream::new();
-    let mut state = State::new();
+    let state = Arc::new(Mutex::new(State::new()));
 
     loop {
-        terminal.draw(|f| draw(f, &mut state))?;
+        terminal.draw(|f| {
+            let mut state = state.lock().unwrap();
+            draw(f, &mut state)
+        })?;
 
-        let ev = match async_std::future::timeout(Duration::from_millis(500), reader.next()).await {
+        let ev = match async_std::future::timeout(Duration::from_millis(50), reader.next()).await {
             Err(_) => {
                 // timeout expired
                 continue;
@@ -143,6 +151,8 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
                 }
 
                 if code == KeyCode::Tab || code == KeyCode::BackTab {
+                    let mut state = state.lock().unwrap();
+
                     let tab_order = [
                         WidgetId::Search,
                         WidgetId::Places,
@@ -161,7 +171,7 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
                     continue;
                 }
 
-                handle_event(code, &mut state).await?;
+                handle_key_event(code, &state).await?;
             }
             Some(Err(_)) | None => break,
         }
@@ -194,11 +204,12 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
         widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     };
 
+    let focus = state.focus;
     let block = |widget, title| {
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(if state.focus == widget {
+            .border_style(if focus == widget {
                 Style::default().fg(Color::LightYellow)
             } else {
                 Style::default()
@@ -214,6 +225,21 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
                     .fg(Color::LightYellow)
                     .add_modifier(Modifier::ITALIC | Modifier::DIM),
             )
+    };
+
+    let worker_busy = {
+        match state.worker_state {
+            WorkerState::Idle => false,
+            WorkerState::Fetching => {
+                state.fetching_spinner.tick();
+                true
+            }
+            WorkerState::Error(ref e) => {
+                let error = Paragraph::new(e.to_string()).block(block(WidgetId::Error, "Error"));
+                f.render_widget(error, f.size());
+                return;
+            }
+        }
     };
 
     let hchunks = Layout::default()
@@ -235,13 +261,18 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
         .block(block(WidgetId::Search, "Search"))
         .wrap(Wrap { trim: true });
 
+    let symbol = if worker_busy {
+        state.fetching_spinner.pattern().to_string() + " "
+    } else {
+        "> ".to_string()
+    };
+
     let found_entries = list(
         WidgetId::Places,
         "Places",
-        ">> ",
+        &symbol,
         state
             .places
-            .data
             .iter()
             .map(|e| {
                 ListItem::new(Spans::from(vec![
@@ -262,7 +293,6 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
         "* ",
         state
             .options
-            .data
             .iter()
             .map(|(k, v)| {
                 ListItem::new(format!(
@@ -281,29 +311,40 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
         .wrap(Wrap { trim: true });
 
     f.render_widget(city_input, left_chunks[0]);
-    f.render_stateful_widget(found_entries, left_chunks[1], &mut state.places.state);
+    f.render_stateful_widget(found_entries, left_chunks[1], &mut state.places.state());
 
     if state.focus == WidgetId::Options {
-        f.render_stateful_widget(options, right_chunks[0], &mut state.options.state);
+        f.render_stateful_widget(options, right_chunks[0], &mut state.options.state());
     } else {
         f.render_widget(options, right_chunks[0]);
     }
     f.render_widget(keybindings, right_chunks[1]);
 }
 
-async fn handle_event(code: event::KeyCode, state: &mut State) -> anyhow::Result<()> {
+async fn handle_key_event(code: event::KeyCode, state_m: &Arc<Mutex<State>>) -> anyhow::Result<()> {
     use event::KeyCode;
+
+    let mut state = state_m.lock().unwrap();
+
+    if state.worker_busy() {
+        return Ok(());
+    }
 
     match state.focus {
         WidgetId::Search => match code {
             KeyCode::Enter => {
                 if !state.user_city.is_empty() {
-                    let cities = roads::search(&state.user_city)
-                        .await
-                        .map_err(anyhow::Error::msg)?;
+                    let user_city = state.user_city.clone();
 
-                    state.places = WrappingList::new(cities);
-                    state.focus = WidgetId::Places;
+                    state.fetch(
+                        Arc::clone(&state_m),
+                        async move { roads::search(&user_city).await.map_err(anyhow::Error::msg) },
+                        |state, cities| {
+                            state.places = WrappingList::new(cities);
+                            state.focus = WidgetId::Places;
+                            Ok(())
+                        },
+                    );
                 }
             }
             code => {
@@ -321,14 +362,20 @@ async fn handle_event(code: event::KeyCode, state: &mut State) -> anyhow::Result
             }
             KeyCode::Enter => {
                 if let Some(place) = state.places.selected() {
-                    let paths = roads::fetch_roads(place)
-                        .await
-                        .map_err(anyhow::Error::msg)?;
+                    let place: NominatimEntry = place.clone();
 
-                    let w = state.option(State::WIDTH_OPTION).unwrap();
-                    let h = state.option(State::HEIGHT_OPTION).unwrap();
-                    let sw = state.option(State::STROKE_WIDTH_OPTION).unwrap();
-                    dump_svg(&format!("{}.svg", state.user_city), (w, h), sw, paths)?;
+                    state.fetch(
+                        Arc::clone(&state_m),
+                        async move { roads::fetch_roads(&place).await.map_err(anyhow::Error::msg) },
+                        move |state, paths| {
+                            let w = state.option(State::WIDTH_OPTION).unwrap();
+                            let h = state.option(State::HEIGHT_OPTION).unwrap();
+                            let sw = state.option(State::STROKE_WIDTH_OPTION).unwrap();
+
+                            dump_svg(&format!("{}.svg", &state.user_city), (w, h), sw, paths)?;
+                            Ok(())
+                        },
+                    );
                 }
             }
             _ => {}
@@ -351,6 +398,13 @@ async fn handle_event(code: event::KeyCode, state: &mut State) -> anyhow::Result
             }
         },
         WidgetId::Keybindings => {}
+        WidgetId::Error => match code {
+            KeyCode::Enter => {
+                state.worker_state = WorkerState::Idle;
+                state.focus = WidgetId::Search;
+            }
+            _ => {}
+        },
     }
 
     Ok(())
