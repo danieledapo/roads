@@ -64,7 +64,7 @@ enum WidgetId {
     Places,
     Search,
     Options,
-    Keybindings,
+    Help,
     Error,
     ParamEdit,
 }
@@ -222,7 +222,7 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
                             WidgetId::Search,
                             WidgetId::Places,
                             WidgetId::Options,
-                            WidgetId::Keybindings,
+                            WidgetId::Help,
                         ];
                         let current = tab_order.iter().position(|w| w == &st.focus).unwrap();
                         let next = current
@@ -373,9 +373,20 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
             .collect(),
     );
 
-    let keybindings = Paragraph::new("TODO")
-        .block(block(WidgetId::Keybindings, "Keybindigs"))
-        .wrap(Wrap { trim: true });
+    let help = Paragraph::new(
+        r#"Simple TUI to render the roads of a given place into an svg file.
+
+To start off, search a place by editing the Search line edit, hit enter and select the desired place to render.
+
+Use the arrow keys or jk to move up and down and <TAB> to switch section.
+
+Hit <Enter> on an option to edit it.
+
+Esc or Ctrl-C to quit.
+"#,
+    )
+    .block(block(WidgetId::Help, "Help"))
+    .wrap(Wrap { trim: true });
 
     f.render_widget(city_input, left_chunks[0]);
     f.render_stateful_widget(found_entries, left_chunks[1], &mut state.places.state());
@@ -385,7 +396,7 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
     } else {
         f.render_widget(options, right_chunks[0]);
     }
-    f.render_widget(keybindings, right_chunks[1]);
+    f.render_widget(help, right_chunks[1]);
 
     if state.focus == WidgetId::ParamEdit {
         let edit_state = state.parm_edit_state.as_ref().unwrap();
@@ -526,7 +537,7 @@ async fn handle_key_event(
                 edit_state.is_valid = edit_state.value.from_str(&edit_state.buffer);
             }
         },
-        WidgetId::Keybindings => {}
+        WidgetId::Help => {}
         WidgetId::Error => match code {
             KeyCode::Enter => {
                 state.worker_state = WorkerState::Idle;

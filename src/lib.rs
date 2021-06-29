@@ -87,7 +87,7 @@ impl LatLon {
     /// Earth radius in meters.
     const EARTH_RADIUS: f64 = 6378137.0;
 
-    pub fn to_xy(&self) -> (f64, f64) {
+    pub fn to_xy(self) -> (f64, f64) {
         // https://wiki.openstreetmap.org/wiki/Mercator
 
         use std::f64::consts::FRAC_PI_4;
