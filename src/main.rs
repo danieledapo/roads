@@ -1,6 +1,9 @@
 use std::{
+    any::Any,
+    fmt::Display,
     fs,
     io::{self, Write},
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -20,13 +23,40 @@ use roads::{
     NominatimEntry,
 };
 
+trait ParamValue: Display + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn cloned(&self) -> Box<dyn ParamValue>;
+    fn from_str(&mut self, s: &str) -> bool;
+}
+
+impl<E, T: Clone + Display + Send + Sync + FromStr<Err = E> + 'static> ParamValue for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ParamValue> {
+        Box::new(self.clone())
+    }
+
+    fn from_str(&mut self, s: &str) -> bool {
+        match s.parse() {
+            Ok(r) => {
+                *self = r;
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
 struct State {
     focus: WidgetId,
     user_city: String,
     places: WrappingList<NominatimEntry>,
-    options: WrappingList<(&'static str, f64)>,
+    params: WrappingList<(&'static str, Box<dyn ParamValue>)>,
     worker_state: WorkerState,
     fetching_spinner: DotsSpinner,
+    parm_edit_state: Option<ParmEditState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,12 +66,31 @@ enum WidgetId {
     Options,
     Keybindings,
     Error,
+    ParamEdit,
 }
 
 enum WorkerState {
     Idle,
     Fetching,
     Error(anyhow::Error),
+}
+
+struct ParmEditState {
+    buffer: String,
+    value: Box<dyn ParamValue>,
+    is_valid: bool,
+}
+
+impl ParmEditState {
+    fn new(mut value: Box<dyn ParamValue>) -> Self {
+        let buffer = value.to_string();
+        let is_valid = value.from_str(&buffer);
+        ParmEditState {
+            buffer,
+            value,
+            is_valid,
+        }
+    }
 }
 
 impl State {
@@ -54,13 +103,14 @@ impl State {
             focus: WidgetId::Search,
             user_city: String::new(),
             places: WrappingList::new(vec![]),
-            options: WrappingList::new(vec![
-                (Self::WIDTH_OPTION, 1920.0),
-                (Self::HEIGHT_OPTION, 1080.0),
-                (Self::STROKE_WIDTH_OPTION, 0.1),
+            params: WrappingList::new(vec![
+                (Self::WIDTH_OPTION, Box::new(1920.0)),
+                (Self::HEIGHT_OPTION, Box::new(1080.0)),
+                (Self::STROKE_WIDTH_OPTION, Box::new(0.3)),
             ]),
             worker_state: WorkerState::Idle,
             fetching_spinner: DotsSpinner::new(),
+            parm_edit_state: None,
         }
     }
 
@@ -72,18 +122,29 @@ impl State {
     }
 
     fn max_option_key_len(&self) -> usize {
-        self.options
+        self.params
             .iter()
             .map(|(k, _)| k.len())
             .max()
             .unwrap_or_default()
     }
 
-    fn option(&self, key: &str) -> Option<f64> {
-        self.options
-            .iter()
-            .find(|(k, _)| k == &key)
-            .map(|(_, v)| *v)
+    fn param<T: Any>(&self, key: &str) -> &T {
+        for (k, v) in self.params.iter() {
+            if k != &key {
+                continue;
+            }
+
+            return v.as_any().downcast_ref::<T>().expect("invalid param type");
+        }
+
+        panic!("parameter {} not found", key)
+    }
+
+    fn set_current_param(&mut self, value: Box<dyn ParamValue>) {
+        if let Some((_, v)) = self.params.selected_mut() {
+            *v = value;
+        }
     }
 
     fn fetch<T: Send + 'static>(
@@ -139,6 +200,7 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
             Ok(ev) => ev,
         };
 
+        let mut st = state.lock().unwrap();
         match ev {
             Some(Ok(event)) => {
                 let KeyEvent { code, .. } = match event {
@@ -146,32 +208,32 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
                     _ => continue,
                 };
 
-                if code == KeyCode::Esc {
-                    break;
+                if st.focus != WidgetId::ParamEdit {
+                    if code == KeyCode::Esc {
+                        break;
+                    }
+
+                    if code == KeyCode::Tab || code == KeyCode::BackTab {
+                        let tab_order = [
+                            WidgetId::Search,
+                            WidgetId::Places,
+                            WidgetId::Options,
+                            WidgetId::Keybindings,
+                        ];
+                        let current = tab_order.iter().position(|w| w == &st.focus).unwrap();
+                        let next = current
+                            + if code == KeyCode::Tab {
+                                1
+                            } else {
+                                tab_order.len() - 1
+                            };
+
+                        st.focus = tab_order[next % tab_order.len()];
+                        continue;
+                    }
                 }
 
-                if code == KeyCode::Tab || code == KeyCode::BackTab {
-                    let mut state = state.lock().unwrap();
-
-                    let tab_order = [
-                        WidgetId::Search,
-                        WidgetId::Places,
-                        WidgetId::Options,
-                        WidgetId::Keybindings,
-                    ];
-                    let current = tab_order.iter().position(|w| w == &state.focus).unwrap();
-                    let next = current
-                        + if code == KeyCode::Tab {
-                            1
-                        } else {
-                            tab_order.len() - 1
-                        };
-
-                    state.focus = tab_order[next % tab_order.len()];
-                    continue;
-                }
-
-                handle_key_event(code, &state).await?;
+                handle_key_event(code, &mut st, &state).await?;
             }
             Some(Err(_)) | None => break,
         }
@@ -201,7 +263,7 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
     use tui::{
         layout::{Constraint, Direction, Layout},
         style::{Color, Modifier, Style},
-        widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+        widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     };
 
     let focus = state.focus;
@@ -292,7 +354,7 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
         "Options",
         "* ",
         state
-            .options
+            .params
             .iter()
             .map(|(k, v)| {
                 ListItem::new(format!(
@@ -314,17 +376,54 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
     f.render_stateful_widget(found_entries, left_chunks[1], &mut state.places.state());
 
     if state.focus == WidgetId::Options {
-        f.render_stateful_widget(options, right_chunks[0], &mut state.options.state());
+        f.render_stateful_widget(options, right_chunks[0], &mut state.params.state());
     } else {
         f.render_widget(options, right_chunks[0]);
     }
     f.render_widget(keybindings, right_chunks[1]);
+
+    if state.focus == WidgetId::ParamEdit {
+        let edit_state = state.parm_edit_state.as_ref().unwrap();
+
+        if let Some((param, _)) = state.params.selected() {
+            let parm_edit = Paragraph::new(edit_state.buffer.as_ref())
+                .block(block(WidgetId::ParamEdit, param))
+                .wrap(Wrap { trim: true })
+                .style(if edit_state.is_valid {
+                    Style::default()
+                } else {
+                    Style::default().bg(Color::LightRed)
+                });
+
+            let hcentered = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                ])
+                .split(f.size());
+            let vcentered = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(30),
+                    Constraint::Max(3),
+                    Constraint::Percentage(30),
+                ])
+                .split(hcentered[1]);
+
+            f.render_widget(Clear, vcentered[1]);
+            f.render_widget(parm_edit, vcentered[1]);
+        }
+    }
 }
 
-async fn handle_key_event(code: event::KeyCode, state_m: &Arc<Mutex<State>>) -> anyhow::Result<()> {
+async fn handle_key_event(
+    code: event::KeyCode,
+    state: &mut State,
+    state_m: &Arc<Mutex<State>>,
+) -> anyhow::Result<()> {
     use event::KeyCode;
-
-    let mut state = state_m.lock().unwrap();
 
     if state.worker_busy() {
         return Ok(());
@@ -368,9 +467,9 @@ async fn handle_key_event(code: event::KeyCode, state_m: &Arc<Mutex<State>>) -> 
                         Arc::clone(&state_m),
                         async move { roads::fetch_roads(&place).await.map_err(anyhow::Error::msg) },
                         move |state, paths| {
-                            let w = state.option(State::WIDTH_OPTION).unwrap();
-                            let h = state.option(State::HEIGHT_OPTION).unwrap();
-                            let sw = state.option(State::STROKE_WIDTH_OPTION).unwrap();
+                            let w = *state.param::<f64>(State::WIDTH_OPTION);
+                            let h = *state.param::<f64>(State::HEIGHT_OPTION);
+                            let sw = *state.param::<f64>(State::STROKE_WIDTH_OPTION);
 
                             dump_svg(&format!("{}.svg", &state.user_city), (w, h), sw, paths)?;
                             Ok(())
@@ -382,19 +481,38 @@ async fn handle_key_event(code: event::KeyCode, state_m: &Arc<Mutex<State>>) -> 
         },
         WidgetId::Options => match code {
             KeyCode::Up | KeyCode::Char('k') => {
-                state.options.up();
+                state.params.up();
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                state.options.down();
+                state.params.down();
+            }
+            KeyCode::Enter => {
+                if let Some((_param, value)) = state.params.selected() {
+                    state.parm_edit_state = Some(ParmEditState::new(value.cloned()));
+                    state.focus = WidgetId::ParamEdit;
+                }
+            }
+            _ => {}
+        },
+        WidgetId::ParamEdit => match code {
+            KeyCode::Enter => {
+                if state.parm_edit_state.as_ref().unwrap().is_valid {
+                    let mut edit_state = None;
+                    std::mem::swap(&mut edit_state, &mut state.parm_edit_state);
+
+                    state.set_current_param(edit_state.unwrap().value);
+                    state.focus = WidgetId::Options;
+                }
+            }
+            KeyCode::Esc => {
+                state.parm_edit_state = None;
+                state.focus = WidgetId::Options;
             }
             _ => {
-                if let Some(p) = state.options.selected_mut() {
-                    let mut s = p.1.to_string();
-                    edit_string(&mut s, code);
-                    if let Ok(n) = s.parse::<f64>() {
-                        p.1 = n;
-                    }
-                }
+                let edit_state = state.parm_edit_state.as_mut().unwrap();
+                edit_string(&mut edit_state.buffer, code);
+
+                edit_state.is_valid = edit_state.value.from_str(&edit_state.buffer);
             }
         },
         WidgetId::Keybindings => {}
