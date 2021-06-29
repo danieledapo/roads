@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use crossterm::event;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 
 use async_std::prelude::*;
 
@@ -185,8 +185,6 @@ impl State {
 }
 
 async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> {
-    use event::{Event, EventStream, KeyCode, KeyEvent};
-
     let mut reader = EventStream::new();
     let state = Arc::new(Mutex::new(State::new()));
 
@@ -207,13 +205,15 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
         let mut st = state.lock().unwrap();
         match ev {
             Some(Ok(event)) => {
-                let KeyEvent { code, .. } = match event {
+                let KeyEvent { code, modifiers } = match event {
                     Event::Key(k) => k,
                     _ => continue,
                 };
 
                 if st.focus != WidgetId::ParamEdit {
-                    if code == KeyCode::Esc {
+                    if code == KeyCode::Esc
+                        || (code, modifiers) == (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                    {
                         break;
                     }
 
@@ -424,12 +424,10 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
 }
 
 async fn handle_key_event(
-    code: event::KeyCode,
+    code: KeyCode,
     state: &mut State,
     state_m: &Arc<Mutex<State>>,
 ) -> anyhow::Result<()> {
-    use event::KeyCode;
-
     if state.worker_busy() {
         return Ok(());
     }
@@ -541,9 +539,7 @@ async fn handle_key_event(
     Ok(())
 }
 
-fn edit_string(s: &mut String, code: event::KeyCode) -> bool {
-    use event::KeyCode;
-
+fn edit_string(s: &mut String, code: KeyCode) -> bool {
     match code {
         KeyCode::Backspace => {
             s.pop();
