@@ -97,6 +97,8 @@ impl State {
     const WIDTH_OPTION: &'static str = "Width";
     const HEIGHT_OPTION: &'static str = "Height";
     const STROKE_WIDTH_OPTION: &'static str = "Line width";
+    const BACKGROUND_COLOR: &'static str = "Background color";
+    const OPEN_OPTION: &'static str = "Open on save";
 
     fn new() -> Self {
         State {
@@ -107,6 +109,8 @@ impl State {
                 (Self::WIDTH_OPTION, Box::new(1920.0)),
                 (Self::HEIGHT_OPTION, Box::new(1080.0)),
                 (Self::STROKE_WIDTH_OPTION, Box::new(0.3)),
+                // (Self::BACKGROUND_COLOR, Box::new("none".to_string())),
+                (Self::OPEN_OPTION, Box::new(true)),
             ]),
             worker_state: WorkerState::Idle,
             fetching_spinner: DotsSpinner::new(),
@@ -357,13 +361,14 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
             .params
             .iter()
             .map(|(k, v)| {
-                ListItem::new(format!(
-                    "{}: {:spaces$}{}",
-                    k,
-                    " ",
-                    v,
-                    spaces = max_option_key_len - k.len()
-                ))
+                let mut s = k.to_string();
+                s += ": ";
+                for _ in 0..max_option_key_len - k.len() {
+                    s.push(' ');
+                }
+                s += &v.to_string();
+
+                ListItem::new(s)
             })
             .collect(),
     );
@@ -470,8 +475,16 @@ async fn handle_key_event(
                             let w = *state.param::<f64>(State::WIDTH_OPTION);
                             let h = *state.param::<f64>(State::HEIGHT_OPTION);
                             let sw = *state.param::<f64>(State::STROKE_WIDTH_OPTION);
+                            let background = state.param::<String>(State::BACKGROUND_COLOR);
 
-                            dump_svg(&format!("{}.svg", &state.user_city), (w, h), sw, paths)?;
+                            let path = format!("{}.svg", &state.user_city);
+                            dump_svg(&path, (w, h), sw, background, paths)?;
+
+                            let open_on_save = *state.param::<bool>(State::OPEN_OPTION);
+                            if open_on_save {
+                                opener::open(&path)?;
+                            }
+
                             Ok(())
                         },
                     );
@@ -548,6 +561,7 @@ fn dump_svg(
     path: &str,
     (w, h): (f64, f64),
     stroke_width: f64,
+    background_color: &str,
     mut paths: Vec<Vec<(f64, f64)>>,
 ) -> io::Result<()> {
     use std::f64::{INFINITY, NEG_INFINITY};
@@ -582,11 +596,13 @@ fn dump_svg(
     writeln!(
         f,
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {:.2} {:.2}">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.2} {h:.2}">
+<rect x="0" y="0" width="{w:.2}" height="{h:.2}" fill="{background}" stroke="none"/>
 <g stroke="black" stroke-width="{}" fill="none" >"#,
-        (max_x - min_x) * sf,
-        (max_y - min_y) * sf,
         stroke_width,
+        w = (max_x - min_x) * sf,
+        h = (max_y - min_y) * sf,
+        background = background_color,
     )?;
 
     for p in paths {

@@ -10,6 +10,7 @@ edition = "2018"
 anyhow = "1.0"
 async-std = "1.9"
 crossterm = { version = "0.20", features = ["event-stream"] }
+opener = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 surf = "2.2"
