@@ -109,7 +109,7 @@ impl State {
                 (Self::WIDTH_OPTION, Box::new(1920.0)),
                 (Self::HEIGHT_OPTION, Box::new(1080.0)),
                 (Self::STROKE_WIDTH_OPTION, Box::new(0.3)),
-                // (Self::BACKGROUND_COLOR, Box::new("none".to_string())),
+                (Self::BACKGROUND_COLOR, Box::new("none".to_string())),
                 (Self::OPEN_OPTION, Box::new(true)),
             ]),
             worker_state: WorkerState::Idle,
