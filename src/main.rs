@@ -320,7 +320,7 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
 
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
         .split(hchunks[1]);
 
     let city_input = Paragraph::new(state.user_city.as_ref())
