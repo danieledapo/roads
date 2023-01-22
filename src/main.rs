@@ -207,7 +207,9 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
         let mut st = state.lock().unwrap();
         match ev {
             Some(Ok(event)) => {
-                let KeyEvent { code, modifiers } = match event {
+                let KeyEvent {
+                    code, modifiers, ..
+                } = match event {
                     Event::Key(k) => k,
                     _ => continue,
                 };
