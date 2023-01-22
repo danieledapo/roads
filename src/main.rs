@@ -348,8 +348,9 @@ fn draw(f: &mut Frame<impl Backend>, state: &mut State) {
             .map(|e| {
                 ListItem::new(Spans::from(vec![
                     Span::raw(e.display_name.clone()),
+                    Span::raw(" "),
                     Span::styled(
-                        format!(" ({} - {})", e.osm_id, e.osm_type),
+                        format!("({} - {})", e.osm_id, e.osm_type),
                         Style::default().add_modifier(Modifier::ITALIC),
                     ),
                 ]))
