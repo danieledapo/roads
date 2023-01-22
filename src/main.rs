@@ -2,6 +2,7 @@ use std::{
     any::Any,
     fmt::Display,
     fs,
+    future::Future,
     io::{self, Write},
     str::FromStr,
     sync::{Arc, Mutex},
@@ -10,7 +11,8 @@ use std::{
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 
-use async_std::prelude::*;
+use futures::StreamExt;
+use tokio::runtime::Runtime;
 
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -160,7 +162,7 @@ impl State {
         self.worker_state = WorkerState::Fetching;
         self.fetching_spinner = DotsSpinner::new();
 
-        let _complete = async_std::task::spawn(async move {
+        let _complete = tokio::task::spawn(async move {
             let err = |st: &mut State, e| {
                 st.worker_state = WorkerState::Error(e);
                 st.focus = WidgetId::Error;
@@ -194,7 +196,7 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
             draw(f, &mut state)
         })?;
 
-        let ev = match async_std::future::timeout(Duration::from_millis(50), reader.next()).await {
+        let ev = match tokio::time::timeout(Duration::from_millis(50), reader.next()).await {
             Err(_) => {
                 // timeout expired
                 continue;
@@ -255,7 +257,8 @@ fn main() -> anyhow::Result<()> {
 
     terminal.clear()?;
 
-    async_std::task::block_on(main_loop(&mut terminal))?;
+    let runtime = Runtime::new().unwrap();
+    let _ = runtime.block_on(main_loop(&mut terminal));
 
     terminal.clear()?;
     crossterm::terminal::disable_raw_mode()?;

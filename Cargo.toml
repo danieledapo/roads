@@ -2,16 +2,17 @@
 name = "roads"
 version = "0.1.0"
 authors = ["Daniele D'Orazio <d.dorazio96@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0"
-async-std = "1.9"
 crossterm = { version = "0.23", features = ["event-stream"] }
+futures = "0.3.25"
 opener = "0.5"
+reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-surf = "2.3"
+tokio = { version = "1", features = ["full"] }
 tui = { version = "0.17", default-features = false, features = ["crossterm"] }

@@ -36,16 +36,22 @@ struct LatLon {
     lon: f64,
 }
 
-pub async fn search(place: &str) -> surf::Result<Vec<NominatimEntry>> {
-    surf::get(&format!(
-        "https://nominatim.openstreetmap.org/search/{}?format=json",
-        place
-    ))
-    .recv_json::<Vec<NominatimEntry>>()
-    .await
+pub async fn search(place: &str) -> reqwest::Result<Vec<NominatimEntry>> {
+    reqwest::Client::new()
+        .get(format!(
+            "https://nominatim.openstreetmap.org/search/{place}?format=json"
+        ))
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("roads/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await?
+        .json()
+        .await
 }
 
-pub async fn fetch_roads(entry: &NominatimEntry) -> surf::Result<Vec<Vec<(f64, f64)>>> {
+pub async fn fetch_roads(entry: &NominatimEntry) -> reqwest::Result<Vec<Vec<(f64, f64)>>> {
     let query = if entry.osm_type != "relation" && entry.osm_type != "way" {
         format!(
             r#"[out:json][timeout:60][bbox:{},{},{},{}];
@@ -71,10 +77,14 @@ out geom;"#,
         )
     };
 
-    let r: OverpassResponse = surf::post("https://overpass-api.de/api/interpreter")
-        .body(surf::Body::from_form(&OverpassForm { data: query })?)
-        .content_type("application/osm3s+xml")
-        .recv_json()
+    let client = reqwest::Client::new();
+    let r: OverpassResponse = client
+        .post("https://overpass-api.de/api/interpreter")
+        .form(&OverpassForm { data: query })
+        .header(reqwest::header::CONTENT_TYPE, "application/osm3s+xml")
+        .send()
+        .await?
+        .json()
         .await?;
 
     Ok(r.elements
