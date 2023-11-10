@@ -5,7 +5,7 @@ use std::{
     future::Future,
     io::{self, Write},
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 
@@ -13,6 +13,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 
 use futures::StreamExt;
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 
 use tui::{
     backend::{Backend, CrosstermBackend},
@@ -171,14 +172,14 @@ impl State {
 
             match fut.await {
                 Ok(d) => {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock().await;
                     state.worker_state = WorkerState::Idle;
                     if let Err(e) = on_success(&mut state, d) {
                         err(&mut state, e);
                     }
                 }
                 Err(e) => {
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock().await;
                     err(&mut state, e);
                 }
             }
@@ -191,10 +192,10 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
     let state = Arc::new(Mutex::new(State::new()));
 
     loop {
-        terminal.draw(|f| {
-            let mut state = state.lock().unwrap();
-            draw(f, &mut state)
-        })?;
+        {
+            let mut st = state.lock().await;
+            terminal.draw(|f| draw(f, &mut st))?;
+        }
 
         let ev = match tokio::time::timeout(Duration::from_millis(50), reader.next()).await {
             Err(_) => {
@@ -204,7 +205,7 @@ async fn main_loop(terminal: &mut Terminal<impl Backend>) -> anyhow::Result<()> 
             Ok(ev) => ev,
         };
 
-        let mut st = state.lock().unwrap();
+        let mut st = state.lock().await;
         match ev {
             Some(Ok(event)) => {
                 let KeyEvent {
