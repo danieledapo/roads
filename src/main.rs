@@ -28,7 +28,7 @@ use roads::{
 trait ParamValue: Display + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn cloned(&self) -> Box<dyn ParamValue>;
-    fn from_str(&mut self, s: &str) -> bool;
+    fn parse_from(&mut self, s: &str) -> bool;
 }
 
 impl<E, T: Clone + Display + Send + Sync + FromStr<Err = E> + 'static> ParamValue for T {
@@ -40,7 +40,7 @@ impl<E, T: Clone + Display + Send + Sync + FromStr<Err = E> + 'static> ParamValu
         Box::new(self.clone())
     }
 
-    fn from_str(&mut self, s: &str) -> bool {
+    fn parse_from(&mut self, s: &str) -> bool {
         match s.parse() {
             Ok(r) => {
                 *self = r;
@@ -86,7 +86,7 @@ struct ParmEditState {
 impl ParmEditState {
     fn new(mut value: Box<dyn ParamValue>) -> Self {
         let buffer = value.to_string();
-        let is_valid = value.from_str(&buffer);
+        let is_valid = value.parse_from(&buffer);
         ParmEditState {
             buffer,
             value,
@@ -395,10 +395,10 @@ Esc or Ctrl-C to quit.
     .wrap(Wrap { trim: true });
 
     f.render_widget(city_input, left_chunks[0]);
-    f.render_stateful_widget(found_entries, left_chunks[1], &mut state.places.state());
+    f.render_stateful_widget(found_entries, left_chunks[1], state.places.state());
 
     if state.focus == WidgetId::Options {
-        f.render_stateful_widget(options, right_chunks[0], &mut state.params.state());
+        f.render_stateful_widget(options, right_chunks[0], state.params.state());
     } else {
         f.render_widget(options, right_chunks[0]);
     }
@@ -456,7 +456,7 @@ async fn handle_key_event(
                     let user_city = state.user_city.clone();
 
                     state.fetch(
-                        Arc::clone(&state_m),
+                        Arc::clone(state_m),
                         async move { roads::search(&user_city).await.map_err(anyhow::Error::msg) },
                         |state, cities| {
                             state.places = WrappingList::new(cities);
@@ -484,7 +484,7 @@ async fn handle_key_event(
                     let place: NominatimEntry = place.clone();
 
                     state.fetch(
-                        Arc::clone(&state_m),
+                        Arc::clone(state_m),
                         async move { roads::fetch_roads(&place).await.map_err(anyhow::Error::msg) },
                         move |state, paths| {
                             let w = *state.param::<f64>(State::WIDTH_OPTION);
@@ -540,17 +540,16 @@ async fn handle_key_event(
                 let edit_state = state.parm_edit_state.as_mut().unwrap();
                 edit_string(&mut edit_state.buffer, code);
 
-                edit_state.is_valid = edit_state.value.from_str(&edit_state.buffer);
+                edit_state.is_valid = edit_state.value.parse_from(&edit_state.buffer);
             }
         },
         WidgetId::Help => {}
-        WidgetId::Error => match code {
-            KeyCode::Enter => {
+        WidgetId::Error => {
+            if code == KeyCode::Enter {
                 state.worker_state = WorkerState::Idle;
                 state.focus = WidgetId::Search;
             }
-            _ => {}
-        },
+        }
     }
 
     Ok(())
