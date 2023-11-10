@@ -38,9 +38,8 @@ struct LatLon {
 
 pub async fn search(place: &str) -> reqwest::Result<Vec<NominatimEntry>> {
     reqwest::Client::new()
-        .get(format!(
-            "https://nominatim.openstreetmap.org/search/{place}?format=json"
-        ))
+        .get("https://nominatim.openstreetmap.org/search")
+        .query(&[("q", place), ("format", "json")])
         .header(
             reqwest::header::USER_AGENT,
             format!("roads/{}", env!("CARGO_PKG_VERSION")),
